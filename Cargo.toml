@@ -1,38 +1,6 @@
-[package]
-name = "chroma-siege"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-wasm-bindgen = "0.2"
-js-sys = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-console_error_panic_hook = "0.1"
-
-[dependencies.web-sys]
-version = "0.3"
-features = [
-  "Window",
-  "Document",
-  "Element",
-  "HtmlElement",
-  "HtmlCanvasElement",
-  "WebGl2RenderingContext",
-  "WebGlProgram",
-  "WebGlShader",
-  "WebGlBuffer",
-  "WebGlUniformLocation",
-  "WebGlVertexArrayObject",
-  "Storage",
-  "MouseEvent",
-  "KeyboardEvent",
-  "DomRect",
-  "Event",
-  "EventTarget",
-  "Node",
-  "console",
-]
+[workspace]
+resolver = "2"
+members = ["protocol", "client", "server"]
 
 [profile.release]
 opt-level = "s"

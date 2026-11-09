@@ -1,14 +1,15 @@
-//! DOM HUD, upgrade buttons and overlays. Writes to the DOM only on change.
+//! DOM HUD, upgrade buttons, quests and overlays. Writes to the DOM only on change.
 
-use crate::components::Stat;
+use crate::components::{Hue, Stat};
 use crate::config::*;
 use crate::ecs::World;
-use crate::game::{stats_for, Persist, Phase, Run, UiAction};
+use crate::game::{stats_for, Link, Persist, Phase, Quests, Run, UiAction};
+use chroma_protocol::{QuestView, Stats};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use web_sys::{Document, Element};
+use web_sys::{Document, Element, MouseEvent};
 
 pub struct Ui {
     doc: Document,
@@ -64,6 +65,64 @@ fn fmt_time(t: f32) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
+fn reward_text(q: &QuestView) -> String {
+    if q.reward.coins > 0 {
+        format!("+{} кеш, +{} мон.", q.reward.cash, q.reward.coins)
+    } else {
+        format!("+{} кеш", q.reward.cash)
+    }
+}
+
+/// Built only from enums and numbers, so it needs no escaping.
+fn quests_html(list: &[QuestView], pending: &[u32], can_claim: bool) -> String {
+    let mut html = String::new();
+    for q in list {
+        let done = q.completed_at.is_some();
+        let pct = q.progress as f32 / q.target as f32 * 100.0;
+        html.push_str(&format!(
+            "<div class=\"quest{}\"><div>{}</div><div class=\"bar\"><i style=\"width:{:.0}%\"></i></div><div class=\"meta\">{}/{} · {}</div>",
+            if done { " done" } else { "" },
+            q.kind.describe(q.target),
+            pct,
+            q.progress,
+            q.target,
+            reward_text(q)
+        ));
+        if done {
+            let disabled = if !can_claim || pending.contains(&q.id) { " disabled" } else { "" };
+            html.push_str(&format!("<button data-quest=\"{}\"{}>Забрать</button>", q.id, disabled));
+        }
+        html.push_str("</div>");
+    }
+    html
+}
+
+fn stats_text(s: &Stats) -> String {
+    let shots = s.shots_direct + s.shots_mortar;
+    let accuracy = if shots == 0 { 0.0 } else { s.hits as f32 / shots as f32 * 100.0 };
+    let k = |h: Hue| s.kills_by_hue[h.index()];
+    format!(
+        "Волн: {}\nВыстрелов: {} (прямая {}, мортира {})\nПопаданий: {} ({:.0}% от выстрелов)\nУбито: красных {}, зелёных {}, синих {}, серых {}\nДобито: прямой {}, мортирой {}, полосой {}\nПушек взято: {} · улучшений: {}\nУрон по арсеналу: {:.0}\nЗаданий выполнено: {}",
+        s.waves,
+        shots,
+        s.shots_direct,
+        s.shots_mortar,
+        s.hits,
+        accuracy,
+        k(Hue::Red),
+        k(Hue::Green),
+        k(Hue::Blue),
+        s.kills_armored,
+        s.kills_direct,
+        s.kills_mortar,
+        s.kills_strip,
+        s.picks,
+        s.upgrades,
+        s.damage_taken,
+        s.quests_completed
+    )
+}
+
 impl Ui {
     pub fn new(doc: &Document, actions: Rc<RefCell<Vec<UiAction>>>) -> Self {
         let ui = Ui { doc: doc.clone(), cache: RefCell::new(HashMap::new()) };
@@ -85,6 +144,23 @@ impl Ui {
                 .expect("addEventListener failed");
             cb.forget();
         }
+        // Quest buttons are re-rendered often, so one delegated listener handles them all.
+        let queue = actions.clone();
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |ev: MouseEvent| {
+            let Some(target) = ev.target().and_then(|t| t.dyn_into::<Element>().ok()) else {
+                return;
+            };
+            let Some(button) = target.closest("button[data-quest]").expect("closest() failed") else {
+                return;
+            };
+            let raw = button.get_attribute("data-quest").expect("data-quest vanished");
+            let id: u32 = raw.parse().unwrap_or_else(|e| panic!("bad data-quest {raw}: {e}"));
+            queue.borrow_mut().push(UiAction::ClaimQuest(id));
+        });
+        ui.el("quests")
+            .add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())
+            .expect("addEventListener failed");
+        cb.forget();
         ui
     }
 
@@ -107,6 +183,12 @@ impl Ui {
         }
     }
 
+    fn html(&self, id: &str, value: String) {
+        if self.changed(format!("{id}#html"), &value) {
+            self.el(id).set_inner_html(&value);
+        }
+    }
+
     fn flag(&self, id: &str, attr: &str, on: bool) {
         if self.changed(format!("{id}#{attr}"), if on { "1" } else { "0" }) {
             self.el(id).toggle_attribute_with_force(attr, on).expect("toggleAttribute failed");
@@ -116,19 +198,23 @@ impl Ui {
     pub fn sync(&self, world: &World) {
         let run = world.res::<Run>();
         let persist = world.res::<Persist>();
+        let link = world.res::<Link>();
+        let quests = world.res::<Quests>();
         let perm = persist.data.perm;
         let total = perm.plus(run.levels);
         let stats = stats_for(total);
         let playing = run.phase == Phase::Playing;
-        let in_battle = matches!(run.phase, Phase::Playing | Phase::Paused);
 
         self.text("hud-hp", format!("{:.0}/{:.0}", run.hp.max(0.0), stats.max_hp));
         self.text("hud-cash", run.cash.to_string());
         self.text("hud-coins", persist.data.coins.to_string());
+        self.text("hud-wave", run.wave.to_string());
         self.text("hud-level", format!("x{:.2}", enemy_level(run.time)));
         self.text("hud-time", fmt_time(run.time));
+        self.text("hud-link", if link.connected { "онлайн" } else { "нет связи" }.to_string());
+        self.flag("hud-link", "data-offline", !link.connected);
         self.text("btn-pause", if run.phase == Phase::Paused { "Продолжить" } else { "Пауза" }.to_string());
-        self.flag("btn-pause", "disabled", !in_battle);
+        self.flag("btn-pause", "disabled", !run.in_battle() || (run.phase == Phase::Paused && !link.connected));
 
         for s in Stat::ALL {
             let run_lvl = run.levels.get(s);
@@ -143,16 +229,38 @@ impl Ui {
             self.flag(perm_id(s), "disabled", is_maxed(s, p_lvl) || persist.data.coins < p_cost);
         }
 
+        self.html("quests", quests_html(&quests.list, &quests.pending_claims, playing && link.connected));
+        let stats_str = quests.stats.as_ref().map(stats_text).unwrap_or_else(|| "Статистики с сервера пока нет".to_string());
+        self.text("pause-stats", stats_str.clone());
+        self.text("go-stats", stats_str);
+
         self.flag("overlay", "hidden", playing);
         self.flag("panel-menu", "hidden", run.phase != Phase::Menu);
         self.flag("panel-paused", "hidden", run.phase != Phase::Paused);
         self.flag("panel-gameover", "hidden", run.phase != Phase::GameOver);
+
+        let link_error = link.last_error.clone().unwrap_or_default();
+        self.text(
+            "menu-link",
+            if link.connected { String::new() } else { format!("Нет связи с игровым сервером, переподключаюсь… {link_error}") },
+        );
+        self.flag("btn-start", "disabled", !link.connected);
+        self.text(
+            "pause-link",
+            if link.connected {
+                String::new()
+            } else {
+                format!("Связь с сервером потеряна, бой продолжится после переподключения. Задания и статистика этого боя на сервере сброшены. {link_error}")
+            },
+        );
+        self.flag("btn-resume", "disabled", !link.connected);
 
         self.text("menu-coins", persist.data.coins.to_string());
         self.text("menu-best", fmt_time(persist.data.best_time));
         self.text("menu-runs", persist.data.runs.to_string());
         if let Some(r) = &run.result {
             self.text("go-time", fmt_time(r.time));
+            self.text("go-wave", r.wave.to_string());
             self.text("go-kills", r.kills.to_string());
             self.text("go-coins", r.coins.to_string());
         }

@@ -4,11 +4,12 @@ mod draw;
 mod ecs;
 mod game;
 mod math;
+mod net;
 mod render;
 mod save;
 mod ui;
 
-use game::{Persist, Phase, Run, UiAction};
+use game::{Outbox, Persist, Phase, Run, UiAction};
 use math::Vec2;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -66,6 +67,7 @@ fn main() {
     }
 
     let world = game::create_world(save::load(), js_sys::Date::now() as u64);
+    let mut net = net::Net::new(net::default_url());
 
     let frame: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
     let frame_handle = frame.clone();
@@ -74,6 +76,9 @@ fn main() {
         let dt = last.map_or(0.0, |l| ((now - l) / 1000.0) as f32).min(MAX_DT);
         last = Some(now);
 
+        for ev in net.poll(now) {
+            game::handle_net(&world, ev);
+        }
         let pending: Vec<UiAction> = actions.borrow_mut().drain(..).collect();
         for a in pending {
             game::handle_action(&world, a);
@@ -81,6 +86,18 @@ fn main() {
         let playing = world.res::<Run>().phase == Phase::Playing;
         if playing {
             game::update(&world, dt);
+        }
+
+        {
+            let mut outbox = world.res_mut::<Outbox>();
+            if net.is_open() {
+                for msg in outbox.drain() {
+                    net.send(&msg);
+                }
+            } else {
+                // No server session exists while disconnected; a reconnect starts a new one.
+                outbox.clear();
+            }
         }
 
         renderer.begin();

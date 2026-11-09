@@ -1,0 +1,27 @@
+[Unit]
+Description=Chroma Siege game server (WebSocket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/chroma-siege/chroma-server
+Environment=CHROMA_BIND=127.0.0.1:8090
+Environment=CHROMA_ALLOWED_ORIGINS=https://chroma-siege.hjkl.pro
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=2
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

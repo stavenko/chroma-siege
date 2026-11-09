@@ -5,6 +5,7 @@ use crate::config::*;
 use crate::ecs::{Entity, World};
 use crate::math::Vec2;
 use crate::save::SaveData;
+use chroma_protocol::{ClientMsg, GameEvent, QuestView, ServerMsg, Stats, PROTOCOL_VERSION};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -22,6 +23,14 @@ pub enum UiAction {
     TogglePause,
     RunUpgrade(Stat),
     PermUpgrade(Stat),
+    ClaimQuest(u32),
+}
+
+/// Connection-level notifications coming from the network layer.
+pub enum NetEvent {
+    Open,
+    Message(ServerMsg),
+    Closed(String),
 }
 
 // ---------- resources ----------
@@ -49,11 +58,60 @@ impl Rng {
     pub fn pick<T: Copy>(&mut self, items: &[T]) -> T {
         items[(self.next_u64() % items.len() as u64) as usize]
     }
+    pub fn range_u32(&mut self, lo: u32, hi_inclusive: u32) -> u32 {
+        lo + (self.next_u64() % (hi_inclusive - lo + 1) as u64) as u32
+    }
 }
 
 pub struct Persist {
     pub data: SaveData,
     pub dirty: bool,
+}
+
+/// Messages for the server. Events are batched; a control message flushes
+/// pending events first so ordering is preserved.
+#[derive(Default)]
+pub struct Outbox {
+    queue: Vec<ClientMsg>,
+    events: Vec<GameEvent>,
+}
+
+impl Outbox {
+    pub fn event(&mut self, e: GameEvent) {
+        self.events.push(e);
+    }
+    pub fn send(&mut self, msg: ClientMsg) {
+        self.batch_events();
+        self.queue.push(msg);
+    }
+    fn batch_events(&mut self) {
+        if !self.events.is_empty() {
+            let events = std::mem::take(&mut self.events);
+            self.queue.push(ClientMsg::Events { events });
+        }
+    }
+    pub fn drain(&mut self) -> Vec<ClientMsg> {
+        self.batch_events();
+        std::mem::take(&mut self.queue)
+    }
+    pub fn clear(&mut self) {
+        self.queue.clear();
+        self.events.clear();
+    }
+}
+
+#[derive(Default)]
+pub struct Link {
+    pub connected: bool,
+    pub last_error: Option<String>,
+}
+
+/// Server-side view of the current run, as last reported by the server.
+#[derive(Default)]
+pub struct Quests {
+    pub list: Vec<QuestView>,
+    pub stats: Option<Stats>,
+    pub pending_claims: Vec<u32>,
 }
 
 pub struct Deck {
@@ -85,6 +143,7 @@ pub struct RunResult {
     pub time: f32,
     pub kills: u32,
     pub coins: u64,
+    pub wave: u32,
 }
 
 pub struct Run {
@@ -96,6 +155,9 @@ pub struct Run {
     pub levels: Levels,
     pub hp: f32,
     pub spawn_timer: f32,
+    pub wave: u32,
+    /// Rows still to spawn in the current wave.
+    pub rows_left: u32,
     pub result: Option<RunResult>,
 }
 
@@ -110,8 +172,13 @@ impl Run {
             levels: Levels::default(),
             hp: 0.0,
             spawn_timer: 0.0,
+            wave: 0,
+            rows_left: 0,
             result: None,
         }
+    }
+    pub fn in_battle(&self) -> bool {
+        matches!(self.phase, Phase::Playing | Phase::Paused)
     }
 }
 
@@ -150,6 +217,10 @@ pub fn first_free_slot(world: &World, slots: usize) -> Option<usize> {
     used.iter().position(|u| !u)
 }
 
+fn emit(world: &World, e: GameEvent) {
+    world.res_mut::<Outbox>().event(e);
+}
+
 // ---------- world setup ----------
 
 pub fn create_world(save: SaveData, seed: u64) -> World {
@@ -158,6 +229,7 @@ pub fn create_world(save: SaveData, seed: u64) -> World {
     w.register::<Block>();
     w.register::<Health>();
     w.register::<AttackTimer>();
+    w.register::<Killer>();
     w.register::<Gun>();
     w.register::<Bullet>();
     w.register::<Shell>();
@@ -166,18 +238,30 @@ pub fn create_world(save: SaveData, seed: u64) -> World {
     w.insert_resource(Persist { data: save, dirty: false });
     w.insert_resource(Run::new(Phase::Menu));
     w.insert_resource(Deck::empty());
+    w.insert_resource(Outbox::default());
+    w.insert_resource(Link::default());
+    w.insert_resource(Quests::default());
     w
 }
 
 fn start_run(world: &World) {
     world.clear_entities();
     *world.res_mut::<Run>() = Run::new(Phase::Playing);
+    *world.res_mut::<Quests>() = Quests::default();
+    world.res_mut::<Outbox>().send(ClientMsg::StartRun { version: PROTOCOL_VERSION });
     let max_hp = arsenal_stats(world).max_hp;
-    world.res_mut::<Run>().hp = max_hp;
-    {
+    let first_wave_rows = {
         let mut rng = world.res_mut::<Rng>();
         *world.res_mut::<Deck>() = Deck::new(&mut rng);
+        rng.range_u32(WAVE_ROWS_MIN, WAVE_ROWS_MAX)
+    };
+    {
+        let mut run = world.res_mut::<Run>();
+        run.hp = max_hp;
+        run.wave = 1;
+        run.rows_left = first_wave_rows - PRESPAWN_ROWS as u32;
     }
+    emit(world, GameEvent::WaveStarted { wave: 1, level: 1.0 });
     for i in 0..PRESPAWN_ROWS {
         spawn_row(world, CELL / 2.0 + i as f32 * CELL, 1.0);
     }
@@ -208,6 +292,7 @@ fn spawn_row(world: &World, y: f32, power: f32) {
         if let BlockKind::Attacker(_) = kind {
             world.insert(e, AttackTimer(ATTACK_INTERVAL * 0.5));
         }
+        emit(world, GameEvent::Spawned { block: kind });
     }
 }
 
@@ -217,26 +302,108 @@ fn spawn_effect(world: &World, p: Vec2, r0: f32, r1: f32, ttl: f32, color: [f32;
     world.insert(e, Effect { ttl, max_ttl: ttl, r0, r1, color });
 }
 
+// ---------- network ----------
+
+pub fn handle_net(world: &World, ev: NetEvent) {
+    match ev {
+        NetEvent::Open => {
+            {
+                let mut link = world.res_mut::<Link>();
+                link.connected = true;
+                link.last_error = None;
+            }
+            // Reconnected mid-battle: the server forgot the run, start a fresh server session.
+            let (in_battle, wave, time) = {
+                let run = world.res::<Run>();
+                (run.in_battle(), run.wave, run.time)
+            };
+            if in_battle {
+                *world.res_mut::<Quests>() = Quests::default();
+                let mut out = world.res_mut::<Outbox>();
+                out.send(ClientMsg::StartRun { version: PROTOCOL_VERSION });
+                out.event(GameEvent::WaveStarted { wave, level: enemy_level(time) });
+            }
+        }
+        NetEvent::Closed(reason) => {
+            {
+                let mut link = world.res_mut::<Link>();
+                link.connected = false;
+                link.last_error = Some(reason);
+            }
+            world.res_mut::<Quests>().pending_claims.clear();
+            let mut run = world.res_mut::<Run>();
+            if run.phase == Phase::Playing {
+                run.phase = Phase::Paused;
+            }
+        }
+        NetEvent::Message(msg) => handle_server(world, msg),
+    }
+}
+
+fn upsert_quest(list: &mut Vec<QuestView>, q: QuestView) {
+    match list.iter_mut().find(|x| x.id == q.id) {
+        Some(x) => *x = q,
+        None => list.push(q),
+    }
+}
+
+fn handle_server(world: &World, msg: ServerMsg) {
+    match msg {
+        ServerMsg::RunStarted { .. } => {}
+        ServerMsg::Stats { stats, quests } => {
+            let mut q = world.res_mut::<Quests>();
+            q.stats = Some(stats);
+            q.list = quests;
+        }
+        ServerMsg::QuestOffered { quest } | ServerMsg::QuestCompleted { quest } => {
+            upsert_quest(&mut world.res_mut::<Quests>().list, quest);
+        }
+        ServerMsg::RewardGranted { quest_id, reward } => {
+            {
+                let mut q = world.res_mut::<Quests>();
+                q.list.retain(|x| x.id != quest_id);
+                q.pending_claims.retain(|&id| id != quest_id);
+            }
+            {
+                let mut run = world.res_mut::<Run>();
+                run.cash += reward.cash;
+                run.coins += reward.coins;
+            }
+            if reward.coins > 0 {
+                let mut p = world.res_mut::<Persist>();
+                p.data.coins += reward.coins;
+                p.dirty = true;
+            }
+        }
+        ServerMsg::Error { message } => panic!("game server reported an error: {message}"),
+    }
+}
+
 // ---------- actions ----------
 
 pub fn handle_action(world: &World, action: UiAction) {
     let phase = world.res::<Run>().phase;
+    let connected = world.res::<Link>().connected;
     match action {
         UiAction::Click(p) if phase == Phase::Playing => click(world, p),
         UiAction::Click(_) => {}
-        UiAction::Start if matches!(phase, Phase::Menu | Phase::GameOver) => start_run(world),
+        UiAction::Start if connected && matches!(phase, Phase::Menu | Phase::GameOver) => start_run(world),
         UiAction::Start => {}
         UiAction::ToMenu if phase == Phase::GameOver => {
             world.clear_entities();
             *world.res_mut::<Deck>() = Deck::empty();
+            *world.res_mut::<Quests>() = Quests::default();
             world.res_mut::<Run>().phase = Phase::Menu;
+            if connected {
+                world.res_mut::<Outbox>().send(ClientMsg::EndRun);
+            }
         }
         UiAction::ToMenu => {}
         UiAction::TogglePause => {
             let mut run = world.res_mut::<Run>();
             run.phase = match run.phase {
                 Phase::Playing => Phase::Paused,
-                Phase::Paused => Phase::Playing,
+                Phase::Paused if connected => Phase::Playing,
                 other => other,
             };
         }
@@ -244,6 +411,15 @@ pub fn handle_action(world: &World, action: UiAction) {
         UiAction::RunUpgrade(_) => {}
         UiAction::PermUpgrade(stat) if phase == Phase::Menu => perm_upgrade(world, stat),
         UiAction::PermUpgrade(_) => {}
+        UiAction::ClaimQuest(id) if connected && phase == Phase::Playing => {
+            let mut q = world.res_mut::<Quests>();
+            let claimable = q.list.iter().any(|x| x.id == id && x.completed_at.is_some());
+            if claimable && !q.pending_claims.contains(&id) {
+                q.pending_claims.push(id);
+                world.res_mut::<Outbox>().send(ClientMsg::Claim { quest_id: id });
+            }
+        }
+        UiAction::ClaimQuest(_) => {}
     }
 }
 
@@ -277,6 +453,7 @@ fn click(world: &World, p: Vec2) {
             aim: Vec2::new(0.0, -1.0),
         },
     );
+    emit(world, GameEvent::GunPicked { gun: spec.kind, hue: spec.hue, stack: stack as u8 });
 }
 
 fn run_upgrade(world: &World, stat: Stat) {
@@ -298,6 +475,7 @@ fn run_upgrade(world: &World, stat: Stat) {
         let after = arsenal_stats(world);
         world.res_mut::<Run>().hp += after.max_hp - before.max_hp;
     }
+    emit(world, GameEvent::Upgraded { stat });
 }
 
 fn perm_upgrade(world: &World, stat: Stat) {
@@ -338,14 +516,30 @@ pub fn update(world: &World, dt: f32) {
     game_over_system(world);
 }
 
+/// Waves of WAVE_ROWS_MIN..=WAVE_ROWS_MAX rows, separated by a gap of WAVE_GAP_ROWS rows.
 fn spawn_system(world: &World, dt: f32) {
-    let power = {
+    let new_wave = {
         let mut run = world.res_mut::<Run>();
         run.spawn_timer -= dt;
         if run.spawn_timer > 0.0 {
             return;
         }
-        run.spawn_timer += ROW_INTERVAL;
+        run.rows_left == 0
+    };
+    if new_wave {
+        let rows = world.res_mut::<Rng>().range_u32(WAVE_ROWS_MIN, WAVE_ROWS_MAX);
+        let (wave, level) = {
+            let mut run = world.res_mut::<Run>();
+            run.wave += 1;
+            run.rows_left = rows;
+            (run.wave, enemy_level(run.time))
+        };
+        emit(world, GameEvent::WaveStarted { wave, level });
+    }
+    let power = {
+        let mut run = world.res_mut::<Run>();
+        run.rows_left -= 1;
+        run.spawn_timer += if run.rows_left == 0 { ROW_INTERVAL * (1.0 + WAVE_GAP_ROWS) } else { ROW_INTERVAL };
         enemy_level(run.time)
     };
     spawn_row(world, SPAWN_Y, power);
@@ -386,6 +580,7 @@ fn gun_system(world: &World, dt: f32, stats: &ArsenalStats) {
 
     let mut bullets = Vec::new();
     let mut shells = Vec::new();
+    let mut shots = Vec::new();
     {
         let mut guns = world.write::<Gun>();
         for (e, g) in guns.iter_mut() {
@@ -415,6 +610,7 @@ fn gun_system(world: &World, dt: f32, stats: &ArsenalStats) {
                     shells.push(Shell { from: gp, to: tp, t: 0.0, hue: g.spec.hue, dmg: MORTAR.dmg * stats.dmg_mult });
                 }
             }
+            shots.push(GameEvent::Shot { gun: g.spec.kind, hue: g.spec.hue });
             g.shots_left -= 1;
             if g.shots_left == 0 {
                 world.despawn(e);
@@ -430,6 +626,10 @@ fn gun_system(world: &World, dt: f32, stats: &ArsenalStats) {
         let e = world.spawn();
         world.insert(e, s);
     }
+    let mut out = world.res_mut::<Outbox>();
+    for s in shots {
+        out.event(s);
+    }
 }
 
 fn block_snapshot(world: &World) -> Vec<(Entity, Vec2, BlockKind)> {
@@ -441,10 +641,17 @@ fn block_snapshot(world: &World) -> Vec<(Entity, Vec2, BlockKind)> {
         .collect()
 }
 
-fn apply_damage(world: &World, hits: &[(Entity, f32)]) {
+/// Applies damage and remembers the source of the blow that took HP to zero.
+fn apply_damage(world: &World, hits: &[(Entity, f32)], source: KillSource) {
     let mut health = world.write::<Health>();
+    let mut killers = world.write::<Killer>();
     for &(e, d) in hits {
-        health.get_mut(e).expect("damaged block without Health").hp -= d;
+        let h = health.get_mut(e).expect("damaged block without Health");
+        let was_alive = h.hp > 0.0;
+        h.hp -= d;
+        if was_alive && h.hp <= 0.0 {
+            killers.insert(e, Killer(source));
+        }
     }
 }
 
@@ -453,6 +660,7 @@ fn apply_damage(world: &World, hits: &[(Entity, f32)]) {
 fn bullet_system(world: &World, dt: f32) {
     let blocks = block_snapshot(world);
     let mut hits = Vec::new();
+    let mut hit_events = Vec::new();
     let mut sparks = Vec::new();
     {
         let mut pos = world.write::<Pos>();
@@ -473,6 +681,7 @@ fn bullet_system(world: &World, dt: f32) {
                 };
                 if hittable && (pp.x - bp.x).abs() <= reach && (pp.y - bp.y).abs() <= reach {
                     hits.push((be, b.dmg));
+                    hit_events.push(GameEvent::Hit { gun: GunKind::Direct, block: kind });
                     sparks.push(pp);
                     world.despawn(e);
                     break;
@@ -480,7 +689,13 @@ fn bullet_system(world: &World, dt: f32) {
             }
         }
     }
-    apply_damage(world, &hits);
+    apply_damage(world, &hits, KillSource::Direct);
+    {
+        let mut out = world.res_mut::<Outbox>();
+        for h in hit_events {
+            out.event(h);
+        }
+    }
     for p in sparks {
         spawn_effect(world, p, 3.0, 12.0, 0.15, [1.0, 1.0, 0.85, 0.9]);
     }
@@ -504,6 +719,7 @@ fn shell_system(world: &World, dt: f32) {
     }
     let blocks = block_snapshot(world);
     let mut hits = Vec::new();
+    let mut hit_events = Vec::new();
     for &(at, hue, dmg) in &explosions {
         for &(be, bp, kind) in &blocks {
             let affected = match kind {
@@ -515,10 +731,17 @@ fn shell_system(world: &World, dt: f32) {
             let dy = ((at.y - bp.y).abs() - BLOCK / 2.0).max(0.0);
             if affected && dx * dx + dy * dy <= MORTAR_RADIUS * MORTAR_RADIUS {
                 hits.push((be, dmg));
+                hit_events.push(GameEvent::Hit { gun: GunKind::Mortar, block: kind });
             }
         }
     }
-    apply_damage(world, &hits);
+    apply_damage(world, &hits, KillSource::Mortar);
+    {
+        let mut out = world.res_mut::<Outbox>();
+        for h in hit_events {
+            out.event(h);
+        }
+    }
     for (at, hue, _) in explosions {
         let c = crate::draw::hue_color(hue);
         spawn_effect(world, at, 10.0, MORTAR_RADIUS, 0.35, [c[0], c[1], c[2], 0.55]);
@@ -527,32 +750,32 @@ fn shell_system(world: &World, dt: f32) {
 
 /// The strip hurts every block on it; attackers on it hit the arsenal.
 fn strip_system(world: &World, dt: f32, stats: &ArsenalStats) {
-    let mut arsenal_dmg = 0.0;
-    let mut strikes = Vec::new();
+    let mut strip_hits = Vec::new();
+    let mut arsenal_hits = Vec::new();
     {
         let blocks = world.read::<Block>();
         let pos = world.read::<Pos>();
-        let mut health = world.write::<Health>();
         let mut timers = world.write::<AttackTimer>();
         for (e, b) in blocks.iter() {
             let p = pos.get(e).expect("block without Pos").0;
             if p.y < STRIP_TOP || p.y > STRIP_BOTTOM {
                 continue;
             }
-            health.get_mut(e).expect("block without Health").hp -= STRIP_DPS * stats.dmg_mult * dt;
+            strip_hits.push((e, STRIP_DPS * stats.dmg_mult * dt));
             if let BlockKind::Attacker(_) = b.kind {
                 let t = timers.get_mut(e).expect("attacker without AttackTimer");
                 t.0 -= dt;
                 if t.0 <= 0.0 {
                     t.0 += ATTACK_INTERVAL;
-                    arsenal_dmg += ATTACKER_DMG * b.power;
-                    strikes.push(Vec2::new(p.x, STRIP_BOTTOM + 4.0));
+                    arsenal_hits.push((Vec2::new(p.x, STRIP_BOTTOM + 4.0), ATTACKER_DMG * b.power));
                 }
             }
         }
     }
-    world.res_mut::<Run>().hp -= arsenal_dmg;
-    for p in strikes {
+    apply_damage(world, &strip_hits, KillSource::Strip);
+    for (p, dmg) in arsenal_hits {
+        world.res_mut::<Run>().hp -= dmg;
+        emit(world, GameEvent::ArsenalHit { damage: dmg });
         spawn_effect(world, p, 6.0, 26.0, 0.3, [1.0, 0.25, 0.2, 0.8]);
     }
 }
@@ -565,14 +788,18 @@ fn regen_system(world: &World, dt: f32, stats: &ArsenalStats) {
 }
 
 fn death_system(world: &World) {
-    let dead: Vec<(Entity, Vec2, BlockKind, f32)> = {
+    let dead: Vec<(Entity, Vec2, BlockKind, f32, KillSource)> = {
         let blocks = world.read::<Block>();
         let pos = world.read::<Pos>();
         let health = world.read::<Health>();
+        let killers = world.read::<Killer>();
         blocks
             .iter()
             .filter(|(e, _)| health.get(*e).expect("block without Health").hp <= 0.0)
-            .map(|(e, b)| (e, pos.get(e).expect("block without Pos").0, b.kind, b.power))
+            .map(|(e, b)| {
+                let by = killers.get(e).expect("dead block without Killer").0;
+                (e, pos.get(e).expect("block without Pos").0, b.kind, b.power, by)
+            })
             .collect()
     };
     if dead.is_empty() {
@@ -583,7 +810,8 @@ fn death_system(world: &World) {
         let mut run = world.res_mut::<Run>();
         let mut persist = world.res_mut::<Persist>();
         let mut rng = world.res_mut::<Rng>();
-        for (e, p, kind, power) in dead {
+        let mut out = world.res_mut::<Outbox>();
+        for (e, p, kind, power, by) in dead {
             world.despawn(e);
             let (cash, coin_chance, color) = match kind {
                 BlockKind::Armored => (ARMORED_CASH, ARMORED_COIN_CHANCE, crate::draw::ARMORED),
@@ -596,6 +824,7 @@ fn death_system(world: &World) {
                 persist.data.coins += 1;
                 persist.dirty = true;
             }
+            out.event(GameEvent::Killed { block: kind, by });
             pops.push((p, color));
         }
     }
@@ -621,7 +850,7 @@ fn game_over_system(world: &World) {
     }
     run.hp = 0.0;
     run.phase = Phase::GameOver;
-    run.result = Some(RunResult { time: run.time, kills: run.kills, coins: run.coins });
+    run.result = Some(RunResult { time: run.time, kills: run.kills, coins: run.coins, wave: run.wave });
     let mut p = world.res_mut::<Persist>();
     if run.time > p.data.best_time {
         p.data.best_time = run.time;

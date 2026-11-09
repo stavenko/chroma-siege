@@ -1,30 +1,7 @@
 use crate::math::Vec2;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Hue {
-    Red,
-    Green,
-    Blue,
-}
-
-impl Hue {
-    pub const ALL: [Hue; 3] = [Hue::Red, Hue::Green, Hue::Blue];
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BlockKind {
-    /// Harmless, blocks direct fire, never targeted on purpose.
-    Armored,
-    /// Attacks the arsenal from the strip, targeted by guns of the same hue.
-    Attacker(Hue),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GunKind {
-    Direct,
-    Mortar,
-}
+pub use chroma_protocol::{BlockKind, GunKind, Hue, KillSource, Stat};
 
 #[derive(Clone, Copy, Debug)]
 pub struct GunSpec {
@@ -49,6 +26,9 @@ pub struct Health {
 }
 
 pub struct AttackTimer(pub f32);
+
+/// Set on the block by whatever brought its HP to zero first.
+pub struct Killer(pub KillSource);
 
 pub struct Gun {
     pub spec: GunSpec,
@@ -82,21 +62,6 @@ pub struct Effect {
 }
 
 // ---------- upgrades ----------
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Stat {
-    Slots,
-    Damage,
-    Health,
-    Regen,
-}
-
-impl Stat {
-    pub const ALL: [Stat; 4] = [Stat::Slots, Stat::Damage, Stat::Health, Stat::Regen];
-    pub fn index(self) -> usize {
-        self as usize
-    }
-}
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Levels {

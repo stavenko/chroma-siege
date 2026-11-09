@@ -12,22 +12,48 @@
 - **Красная полоса**: наносит урон всем блокам. Цветные блоки с неё атакуют арсенал.
 - **Кеш** тратится на апгрейды в бою, **монеты** — на постоянные апгрейды в меню
   (сохраняются в `localStorage`).
+- **Волна** — 5–7 рядов и пауза. Каждые 5–10 волн сервер выдаёт задание (10 типов),
+  прогресс считается на сервере, награда (кеш, иногда монеты) забирается кнопкой.
+  Без связи с сервером бой не стартует; при обрыве бой встаёт на паузу.
+
+## Сервер
+
+`server/` — WebSocket-сервер (axum). Клиент шлёт события боя (`Spawned`, `Shot`, `Hit`,
+`Killed`, `GunPicked`, `Upgraded`, `WaveStarted`, `ArsenalHit`), сервер раз в 500 мс
+отвечает статистикой, присылает `QuestOffered` / `QuestCompleted` и выдаёт награду по `Claim`.
+Ничего не сохраняется: состояние живёт в памяти на время соединения, у заданий хранятся
+только отметки `created_at` / `completed_at` / `claimed_at`. Протокол — `protocol/src/lib.rs`.
+
+Переменные окружения: `CHROMA_BIND` (по умолчанию `127.0.0.1:8090`),
+`CHROMA_ALLOWED_ORIGINS` (список через запятую), `RUST_LOG`.
 
 ## Запуск
 
 ```bash
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl
 cargo install trunk wasm-bindgen-cli --version 0.2.130   # версия должна совпадать с Cargo.lock
-trunk serve --port 8137
+cargo run -p chroma-server                                # ws://localhost:8090/ws
+cd client && trunk serve --port 8137                      # http://localhost:8137
 ```
 
-Сборка для публикации: `trunk build --release` (результат в `dist/`).
+На `localhost` клиент ходит на `ws://localhost:8090/ws`, на любом другом хосте —
+на `wss://ws.<хост>/ws`.
+
+## Деплой
+
+`deploy/deploy.sh [user@host]` собирает клиент и статический linux-бинарник сервера,
+выкладывает `dist/` в `/var/www/chroma-siege`, сервер в `/opt/chroma-siege` (systemd-юнит
+`chroma-server`, `DynamicUser`), обновляет Caddyfile. Прод: https://chroma-siege.hjkl.pro,
+`wss://ws.chroma-siege.hjkl.pro/ws`.
 
 ## Структура
 
-- `src/ecs.rs` — ECS: сущности с поколениями, разреженные хранилища, ресурсы.
-- `src/components.rs` — компоненты и уровни апгрейдов.
-- `src/game.rs` — ресурсы, обработка действий, системы.
-- `src/config.rs` — разметка поля и весь баланс.
-- `src/render.rs` / `src/draw.rs` — батч-рендерер WebGL2 и отрисовка сцены.
-- `src/ui.rs` — HUD и кнопки в DOM, `src/save.rs` — сохранение.
+- `protocol/` — общие типы сообщений клиента и сервера.
+- `server/src/session.rs` — счётчики, 10 типов заданий, выдача и проверка выполнения.
+- `client/src/net.rs` — WebSocket с автопереподключением.
+- `client/src/ecs.rs` — ECS: сущности с поколениями, разреженные хранилища, ресурсы.
+- `client/src/components.rs` — компоненты и уровни апгрейдов.
+- `client/src/game.rs` — ресурсы, обработка действий, системы.
+- `client/src/config.rs` — разметка поля и весь баланс.
+- `client/src/render.rs` / `client/src/draw.rs` — батч-рендерер WebGL2 и отрисовка сцены.
+- `client/src/ui.rs` — HUD, задания и кнопки в DOM, `client/src/save.rs` — сохранение.

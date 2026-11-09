@@ -1,0 +1,9 @@
+chroma-siege.hjkl.pro {
+	root * /var/www/chroma-siege
+	encode zstd gzip
+	file_server
+}
+
+ws.chroma-siege.hjkl.pro {
+	reverse_proxy 127.0.0.1:8090
+}

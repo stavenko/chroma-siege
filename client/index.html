@@ -10,7 +10,7 @@
     [hidden] { display: none !important; }
     #app { height: 100vh; display: flex; flex-direction: column; align-items: center; }
     #hud, #stage, #upgrades { width: min(100vw, calc((100vh - 104px) * 0.75)); box-sizing: border-box; }
-    #hud { height: 36px; flex: none; display: flex; gap: 14px; align-items: center; padding: 0 8px; white-space: nowrap; }
+    #hud { height: 36px; flex: none; display: flex; gap: 10px; font-size: 13px; align-items: center; padding: 0 8px; white-space: nowrap; }
     #hud .grow { flex: 1; }
     #stage { position: relative; aspect-ratio: 3 / 4; flex: none; }
     #game { width: 100%; height: 100%; display: block; }
@@ -23,6 +23,17 @@
     button { background: #2a2e37; color: #e6e6e6; border: 1px solid #3d4250; border-radius: 4px; padding: 6px; font: inherit; font-size: 12px; white-space: pre-line; cursor: pointer; }
     button:hover:not([disabled]) { background: #343947; }
     button[disabled] { opacity: 0.45; cursor: default; }
+    #hud-link { color: #6fcf8a; }
+    #hud-link[data-offline] { color: #ff6b6b; }
+    #quests { position: absolute; top: 6px; right: 6px; width: 40%; display: flex; flex-direction: column; gap: 4px; pointer-events: auto; }
+    .quest { background: rgba(20, 22, 28, 0.85); border: 1px solid #3d4250; border-radius: 4px; padding: 5px 6px; font-size: 11px; }
+    .quest.done { border-color: #e8c55a; }
+    .quest .bar { height: 4px; background: #000; margin: 4px 0 2px; }
+    .quest .bar i { display: block; height: 100%; background: #e8c55a; }
+    .quest .meta { color: #9aa0aa; }
+    .quest button { margin-top: 4px; width: 100%; padding: 3px; background: #6a5a1f; border-color: #e8c55a; }
+    .error { color: #ff6b6b; font-size: 12px; }
+    .stats { white-space: pre-line; font-size: 12px; color: #c9ced6; background: rgba(255,255,255,0.04); padding: 6px; border-radius: 4px; }
     button.primary { background: #3b6fd8; border-color: #4f80e6; font-size: 14px; }
   </style>
 </head>
@@ -32,12 +43,15 @@
       <span>HP <b id="hud-hp"></b></span>
       <span>Кеш <b id="hud-cash"></b></span>
       <span>Монеты <b id="hud-coins"></b></span>
+      <span>Волна <b id="hud-wave"></b></span>
       <span>Враги <b id="hud-level"></b></span>
-      <span class="grow"><b id="hud-time"></b></span>
+      <span><b id="hud-time"></b></span>
+      <span class="grow"><b id="hud-link"></b></span>
       <button id="btn-pause"></button>
     </div>
     <div id="stage">
       <canvas id="game"></canvas>
+      <div id="quests"></div>
       <div id="overlay">
         <div id="panel-menu" class="panel">
           <h1>Chroma Siege</h1>
@@ -48,21 +62,25 @@
           <button id="perm-damage"></button>
           <button id="perm-health"></button>
           <button id="perm-regen"></button>
-          <button id="btn-start" class="primary">Начать бой</button>
+          <button id="btn-start" class="primary" disabled>Начать бой</button>
+          <p id="menu-link" class="error"></p>
           <p class="hint">Клик по стеку внизу ставит его верхнюю пушку в свободный слот арсенала.
             Пушка бьёт ближайший блок своего цвета. Квадрат — прямая наводка, круг — мортира (стреляет навесом, урон по площади).
             Серые блоки неуязвимы для прицельного огня и закрывают собой цветные. Красная полоса наносит урон всем блокам,
-            а цветные блоки с неё атакуют арсенал. P / Esc — пауза.</p>
+            а цветные блоки с неё атакуют арсенал. Каждые 5–10 волн сервер выдаёт задание, за выполнение — кеш, иногда монеты. P / Esc — пауза.</p>
         </div>
-        <div id="panel-paused" class="panel">
+        <div id="panel-paused" class="panel" hidden>
           <h2>Пауза</h2>
+          <p id="pause-link" class="error"></p>
           <button id="btn-resume" class="primary">Продолжить</button>
+          <div id="pause-stats" class="stats"></div>
         </div>
-        <div id="panel-gameover" class="panel">
+        <div id="panel-gameover" class="panel" hidden>
           <h2>Арсенал уничтожен</h2>
-          <p>Время: <b id="go-time"></b></p>
+          <p>Время: <b id="go-time"></b> · волна <b id="go-wave"></b></p>
           <p>Уничтожено блоков: <b id="go-kills"></b></p>
           <p>Монет заработано: <b id="go-coins"></b></p>
+          <div id="go-stats" class="stats"></div>
           <button id="btn-menu" class="primary">В меню</button>
         </div>
       </div>

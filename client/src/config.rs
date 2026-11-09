@@ -28,6 +28,10 @@ pub const BLOCK_SPEED: f32 = 14.0;
 pub const ROW_INTERVAL: f32 = CELL / BLOCK_SPEED;
 pub const SPAWN_Y: f32 = -CELL / 2.0;
 pub const PRESPAWN_ROWS: usize = 4;
+/// A wave is WAVE_ROWS_MIN..=WAVE_ROWS_MAX rows followed by a gap of WAVE_GAP_ROWS empty rows.
+pub const WAVE_ROWS_MIN: u32 = 5;
+pub const WAVE_ROWS_MAX: u32 = 7;
+pub const WAVE_GAP_ROWS: f32 = 2.0;
 pub const FILL_PROB: f32 = 0.5;
 pub const ARMORED_PROB: f32 = 0.25;
 
