@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chroma Siege</title>
+  <link data-trunk rel="rust" data-bin="chroma-siege" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #15171c; color: #e6e6e6; font: 14px/1.3 system-ui, sans-serif; overflow: hidden; }
+    [hidden] { display: none !important; }
+    #app { height: 100vh; display: flex; flex-direction: column; align-items: center; }
+    #hud, #stage, #upgrades { width: min(100vw, calc((100vh - 104px) * 0.75)); box-sizing: border-box; }
+    #hud { height: 36px; flex: none; display: flex; gap: 14px; align-items: center; padding: 0 8px; white-space: nowrap; }
+    #hud .grow { flex: 1; }
+    #stage { position: relative; aspect-ratio: 3 / 4; flex: none; }
+    #game { width: 100%; height: 100%; display: block; }
+    #overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10, 11, 14, 0.82); }
+    .panel { width: min(360px, 90%); display: flex; flex-direction: column; gap: 8px; }
+    .panel h1, .panel h2, .panel h3 { margin: 4px 0; }
+    .panel p { margin: 2px 0; }
+    .hint { color: #9aa0aa; font-size: 12px; }
+    #upgrades { height: 68px; flex: none; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; }
+    button { background: #2a2e37; color: #e6e6e6; border: 1px solid #3d4250; border-radius: 4px; padding: 6px; font: inherit; font-size: 12px; white-space: pre-line; cursor: pointer; }
+    button:hover:not([disabled]) { background: #343947; }
+    button[disabled] { opacity: 0.45; cursor: default; }
+    button.primary { background: #3b6fd8; border-color: #4f80e6; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="hud">
+      <span>HP <b id="hud-hp"></b></span>
+      <span>Кеш <b id="hud-cash"></b></span>
+      <span>Монеты <b id="hud-coins"></b></span>
+      <span>Враги <b id="hud-level"></b></span>
+      <span class="grow"><b id="hud-time"></b></span>
+      <button id="btn-pause"></button>
+    </div>
+    <div id="stage">
+      <canvas id="game"></canvas>
+      <div id="overlay">
+        <div id="panel-menu" class="panel">
+          <h1>Chroma Siege</h1>
+          <p>Монеты: <b id="menu-coins"></b></p>
+          <p class="hint">Лучшее время: <b id="menu-best"></b> · боёв: <b id="menu-runs"></b></p>
+          <h3>Постоянные улучшения</h3>
+          <button id="perm-slots"></button>
+          <button id="perm-damage"></button>
+          <button id="perm-health"></button>
+          <button id="perm-regen"></button>
+          <button id="btn-start" class="primary">Начать бой</button>
+          <p class="hint">Клик по стеку внизу ставит его верхнюю пушку в свободный слот арсенала.
+            Пушка бьёт ближайший блок своего цвета. Квадрат — прямая наводка, круг — мортира (стреляет навесом, урон по площади).
+            Серые блоки неуязвимы для прицельного огня и закрывают собой цветные. Красная полоса наносит урон всем блокам,
+            а цветные блоки с неё атакуют арсенал. P / Esc — пауза.</p>
+        </div>
+        <div id="panel-paused" class="panel">
+          <h2>Пауза</h2>
+          <button id="btn-resume" class="primary">Продолжить</button>
+        </div>
+        <div id="panel-gameover" class="panel">
+          <h2>Арсенал уничтожен</h2>
+          <p>Время: <b id="go-time"></b></p>
+          <p>Уничтожено блоков: <b id="go-kills"></b></p>
+          <p>Монет заработано: <b id="go-coins"></b></p>
+          <button id="btn-menu" class="primary">В меню</button>
+        </div>
+      </div>
+    </div>
+    <div id="upgrades">
+      <button id="run-slots"></button>
+      <button id="run-damage"></button>
+      <button id="run-health"></button>
+      <button id="run-regen"></button>
+    </div>
+  </div>
+</body>
+</html>
