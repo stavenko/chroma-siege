@@ -507,7 +507,7 @@ pub fn update(world: &World, dt: f32) {
     world.maintain();
     shell_system(world, dt);
     world.maintain();
-    strip_system(world, dt, &stats);
+    strip_system(world, dt);
     regen_system(world, dt, &stats);
     death_system(world);
     world.maintain();
@@ -748,20 +748,22 @@ fn shell_system(world: &World, dt: f32) {
     }
 }
 
-/// The strip hurts every block on it; attackers on it hit the arsenal.
-fn strip_system(world: &World, dt: f32, stats: &ArsenalStats) {
+/// The strip hurts every block on it by a share of its max HP; attackers on it hit the arsenal.
+fn strip_system(world: &World, dt: f32) {
     let mut strip_hits = Vec::new();
     let mut arsenal_hits = Vec::new();
     {
         let blocks = world.read::<Block>();
         let pos = world.read::<Pos>();
+        let health = world.read::<Health>();
         let mut timers = world.write::<AttackTimer>();
         for (e, b) in blocks.iter() {
             let p = pos.get(e).expect("block without Pos").0;
             if p.y < STRIP_TOP || p.y > STRIP_BOTTOM {
                 continue;
             }
-            strip_hits.push((e, STRIP_DPS * stats.dmg_mult * dt));
+            let max = health.get(e).expect("block without Health").max;
+            strip_hits.push((e, max * STRIP_MAX_HP_PER_SEC * dt));
             if let BlockKind::Attacker(_) = b.kind {
                 let t = timers.get_mut(e).expect("attacker without AttackTimer");
                 t.0 -= dt;

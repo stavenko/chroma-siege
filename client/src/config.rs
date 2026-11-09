@@ -42,10 +42,13 @@ pub fn enemy_level(t: f32) -> f32 {
 }
 
 pub const ATTACKER_HP: f32 = 30.0;
-pub const ARMORED_HP: f32 = 110.0;
+/// Armored blocks have this many times the attacker HP of the same wave.
+pub const ARMORED_HP_MULT: f32 = 100.0;
+pub const ARMORED_HP: f32 = ATTACKER_HP * ARMORED_HP_MULT;
 pub const ATTACKER_DMG: f32 = 4.0;
 pub const ATTACK_INTERVAL: f32 = 1.5;
-pub const STRIP_DPS: f32 = 6.0;
+/// Spikes on the strip take this fraction of a block's max HP per second, for every block.
+pub const STRIP_MAX_HP_PER_SEC: f32 = 0.2;
 
 pub const ATTACKER_CASH: f32 = 4.0;
 pub const ARMORED_CASH: f32 = 2.0;
